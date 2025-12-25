@@ -4,9 +4,11 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <memory>
 
 namespace py = pybind11;
 
+// 使用结构体管理节点，简化指针逻辑
 struct Node {
     float P;
     float Q = 0, W = 0;
@@ -22,13 +24,15 @@ public:
     MCTS(py::function policy_fn, int n_playout) : policy_fn(policy_fn), n_playout(n_playout) {}
 
     py::tuple get_move_probs(py::object board, float temp) {
-        Node* root = new Node(nullptr, 1.0);
+        // 每次搜索创建新树，搜索完自动销毁，彻底杜绝段错误
+        std::unique_ptr<Node> root_ptr(new Node(nullptr, 1.0));
+        Node* root = root_ptr.get();
         
         for (int n = 0; n < n_playout; ++n) {
-            // 关键：确保 Python 的 BitBoard 类有 copy() 方法
             py::object board_copy = board.attr("copy")();
             Node* node = root;
             
+            // 1. Selection
             while (!node->children.empty()) {
                 float best_u = -1e9;
                 int best_move = -1;
@@ -36,23 +40,27 @@ public:
                     float u = child->Q + 5.0f * child->P * sqrt(node->N + 1) / (1 + child->N);
                     if (u > best_u) { best_u = u; best_move = move; }
                 }
+                if (best_move == -1) break;
                 board_copy.attr("do_move")(best_move);
                 node = node->children[best_move];
             }
 
+            // 2. Expansion & Evaluation
             py::tuple res = policy_fn(board_copy);
             auto action_probs = res[0].cast<std::vector<std::pair<int, float>>>();
             float value = res[1].cast<float>();
             
-            bool end = board_copy.attr("game_end")()[0].cast<bool>();
-            if (!end) {
+            py::tuple end_res = board_copy.attr("game_end")().cast<py::tuple>();
+            bool is_end = end_res[0].cast<bool>();
+            if (!is_end) {
                 for (auto const& [move, prob] : action_probs) 
                     node->children[move] = new Node(node, prob);
             } else {
-                int winner = board_copy.attr("game_end")().cast<py::tuple>()[1].cast<int>();
+                int winner = end_res[1].cast<int>();
                 value = (winner == -1) ? 0.0f : -1.0f;
             }
 
+            // 3. Backpropagation
             while (node) {
                 node->N++;
                 node->W += value;
@@ -64,13 +72,11 @@ public:
 
         std::vector<int> acts;
         std::vector<float> probs;
-        
-        // 安全保障：如果 root 没有孩子，强制从棋盘获取可用动作
         if (root->children.empty()) {
-            py::list availables = board.attr("availables");
-            for (auto item : availables) {
-                acts.push_back(item.cast<int>());
-                probs.push_back(1.0f / availables.size());
+            py::list avail = board.attr("availables");
+            for (auto m : avail) {
+                acts.push_back(m.cast<int>());
+                probs.push_back(1.0f / avail.size());
             }
         } else {
             float sum_n = 0;
@@ -82,8 +88,6 @@ public:
             }
             for (float &p : probs) p /= sum_n;
         }
-
-        delete root;
         return py::make_tuple(acts, probs);
     }
 
