@@ -63,6 +63,9 @@ def train():
             temp = 1.0 if step_count < 30 else 1e-3
             acts, p = mcts.get_move_probs(board, temp)
             
+            p = np.array(p).astype('float64')
+            p /= np.sum(p)
+
             full_p = np.zeros(width*height)
             full_p[list(acts)] = p
             states.append(board.current_state())
