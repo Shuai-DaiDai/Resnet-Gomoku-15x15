@@ -28,7 +28,7 @@ public:
             py::object board_copy = board.attr("copy")();
             Node* node = root;
             
-            // 1. Selection
+            // 1. 选择 (Selection)
             while (!node->children.empty()) {
                 float best_u = -1e9;
                 int best_move = -1;
@@ -40,7 +40,7 @@ public:
                 node = node->children[best_move];
             }
 
-            // 2. Expansion & Evaluation
+            // 2. 扩展与评估 (Expansion & Evaluation)
             py::tuple res = policy_fn(board_copy);
             auto action_probs = res[0].cast<std::vector<std::pair<int, float>>>();
             float value = res[1].cast<float>();
@@ -54,7 +54,7 @@ public:
                 value = (winner == -1) ? 0.0f : -1.0f;
             }
 
-            // 3. Backpropagation
+            // 3. 反向传播 (Backpropagation)
             while (node) {
                 node->N++;
                 node->W += value;
@@ -66,10 +66,15 @@ public:
 
         std::vector<int> acts;
         std::vector<float> probs;
+        float sum_n = 0;
         for (auto const& [move, child] : root->children) {
             acts.push_back(move);
-            probs.push_back(pow(child->N, 1.0/temp));
+            float p = pow(child->N, 1.0/temp);
+            probs.push_back(p);
+            sum_n += p;
         }
+        for (float &p : probs) p /= sum_n; // 归一化概率
+
         delete root;
         return py::make_tuple(acts, probs);
     }
