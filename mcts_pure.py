@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-import copy
+import copy  # 必须导入用于深度克隆
 
 try:
     import mcts_fast
@@ -21,7 +21,7 @@ class BitBoard:
         self.last_move = -1
 
     def copy(self):
-        """深度克隆：这是 C++ 模拟成功的命脉"""
+        """深度克隆：这是 C++ 模拟成功的核心接口"""
         new_board = BitBoard(self.width, self.height, self.n_in_row)
         new_board.bitboards = self.bitboards.copy()
         new_board.current_player = self.current_player
@@ -31,9 +31,9 @@ class BitBoard:
 
     @property
     def availables(self):
-        """稳健获取可用位置：彻底解决 acts 为空的问题"""
+        """核心接口：确保 C++ 永远能拿到可落子位置"""
         occupied = self.bitboards[1] | self.bitboards[2]
-        # 直接遍历 225 个位置，速度虽慢一点点但绝对不会报错
+        # 遍历 225 个位置，检查哪些位是 0（空位）
         return [i for i in range(self.width * self.height) if not (occupied >> i) & 1]
 
     def do_move(self, move):
@@ -46,7 +46,6 @@ class BitBoard:
         """位运算五连珠判断逻辑"""
         w = self.width
         for p, b in self.bitboards.items():
-            # 横、纵、斜下、斜上四方向检查
             for shift in [1, w, w + 1, w - 1]:
                 v = b & (b >> shift)
                 v &= (v >> (2 * shift))
@@ -56,7 +55,7 @@ class BitBoard:
         return False, -1
 
     def current_state(self):
-        """构造神经网络输入矩阵"""
+        """神经网络输入特征图构造"""
         square_state = np.zeros((4, self.width, self.height))
         p1, p2 = self.bitboards[self.current_player], self.bitboards[3 - self.current_player]
         for i in range(self.width * self.height):
