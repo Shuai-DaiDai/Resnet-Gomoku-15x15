@@ -66,37 +66,39 @@ public:
 
         std::vector<int> acts;
         std::vector<float> probs;
-        float sum_p = 0;
         
-        // 数值稳定性改进：处理 temp 趋于 0 的情况
-        if (temp < 1e-3) {
-            int best_move = -1;
-            int max_n = -1;
-            for (auto const& [move, child] : root->children) {
-                if (child->N > max_n) { max_n = child->N; best_move = move; }
-            }
-            acts.push_back(best_move);
-            probs.push_back(1.0f);
-        } else {
-            for (auto const& [move, child] : root->children) {
-                acts.push_back(move);
-                float p = pow((float)child->N + 1e-10f, 1.0f/temp); // 增加 epsilon
-                probs.push_back(p);
-                sum_p += p;
-            }
-            // 最终归一化，确保概率之和为 1 且无 NaN
-            for (float &p : probs) p /= (sum_p + 1e-10f);
-        }
-        
-        // 如果依然为空的极端防御逻辑
-        if (acts.empty()) {
+        if (root->children.empty()) {
             py::list avail = board.attr("availables");
             for (auto m : avail) {
                 acts.push_back(m.cast<int>());
                 probs.push_back(1.0f / avail.size());
             }
-        }
+        } else {
+            // 数值稳定性保护：处理 temp 趋于 0 的情况
+            if (temp < 1e-3) {
+                int best_move = -1; int max_n = -1;
+                for (auto const& [move, child] : root->children) {
+                    if (child->N > max_n) { max_n = child->N; best_move = move; }
+                }
+                acts.push_back(best_move);
+                probs.push_back(1.0f);
+            } else {
+                float sum_p = 0;
+                // 找出最大 N 用于平滑
+                int max_n = 0;
+                for (auto const& [move, child] : root->children) max_n = std::max(max_n, child->N);
 
+                for (auto const& [move, child] : root->children) {
+                    acts.push_back(move);
+                    // 核心修复：增加极小值偏移，并防止指数过大
+                    float p = pow((float)child->N + 1e-8f, 1.0f / temp);
+                    probs.push_back(p);
+                    sum_p += p;
+                }
+                // 归一化，带上 epsilon 防止除以 0 产生 NaN
+                for (float &p : probs) p /= (sum_p + 1e-10f);
+            }
+        }
         return py::make_tuple(acts, probs);
     }
 
