@@ -102,7 +102,7 @@ def train():
             optimizer.zero_grad()
             
             # 混合精度上下文，自动分配 5090 算力
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 lp, v = net(s_t)
                 loss = -torch.mean(torch.sum(p_t * lp, dim=1)) + F.mse_loss(v.view(-1), z_t)
             
