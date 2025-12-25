@@ -25,22 +25,21 @@ public:
         Node* root = new Node(nullptr, 1.0);
         
         for (int n = 0; n < n_playout; ++n) {
+            // 关键：确保 Python 的 BitBoard 类有 copy() 方法
             py::object board_copy = board.attr("copy")();
             Node* node = root;
             
-            // 1. 选择 (Selection)
             while (!node->children.empty()) {
                 float best_u = -1e9;
                 int best_move = -1;
                 for (auto const& [move, child] : node->children) {
-                    float u = child->Q + 5.0f * child->P * sqrt(node->N) / (1 + child->N);
+                    float u = child->Q + 5.0f * child->P * sqrt(node->N + 1) / (1 + child->N);
                     if (u > best_u) { best_u = u; best_move = move; }
                 }
                 board_copy.attr("do_move")(best_move);
                 node = node->children[best_move];
             }
 
-            // 2. 扩展与评估 (Expansion & Evaluation)
             py::tuple res = policy_fn(board_copy);
             auto action_probs = res[0].cast<std::vector<std::pair<int, float>>>();
             float value = res[1].cast<float>();
@@ -54,7 +53,6 @@ public:
                 value = (winner == -1) ? 0.0f : -1.0f;
             }
 
-            // 3. 反向传播 (Backpropagation)
             while (node) {
                 node->N++;
                 node->W += value;
@@ -66,14 +64,24 @@ public:
 
         std::vector<int> acts;
         std::vector<float> probs;
-        float sum_n = 0;
-        for (auto const& [move, child] : root->children) {
-            acts.push_back(move);
-            float p = pow(child->N, 1.0/temp);
-            probs.push_back(p);
-            sum_n += p;
+        
+        // 安全保障：如果 root 没有孩子，强制从棋盘获取可用动作
+        if (root->children.empty()) {
+            py::list availables = board.attr("availables");
+            for (auto item : availables) {
+                acts.push_back(item.cast<int>());
+                probs.push_back(1.0f / availables.size());
+            }
+        } else {
+            float sum_n = 0;
+            for (auto const& [move, child] : root->children) {
+                acts.push_back(move);
+                float p = pow(child->N, 1.0/temp);
+                probs.push_back(p);
+                sum_n += p;
+            }
+            for (float &p : probs) p /= sum_n;
         }
-        for (float &p : probs) p /= sum_n; // 归一化概率
 
         delete root;
         return py::make_tuple(acts, probs);
