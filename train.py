@@ -5,8 +5,7 @@ from collections import deque
 import random
 import os
 from model import Net, device # 确保云端 model.py 的 device 为 "cuda"
-from mcts_pure import BitBoard, TreeNode
-from mcts_fast import MCTS
+from mcts_pure import BitBoard, MCTS
 
 def get_equi_data(play_data, width, height):
     """数据增强：通过旋转和翻转，将1局棋的数据量提升8倍"""
@@ -32,7 +31,7 @@ def train():
     buffer = deque(maxlen=10000) # 增大经验池容量
     
     # 5090 硬件加速：混合精度缩放器
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
 
     # 确保保存目录存在
     if not os.path.exists('./models'): os.makedirs('./models')
@@ -52,7 +51,7 @@ def train():
             availables = [idx for idx in range(width*height) if not (occupied >> idx) & 1]
             return zip(availables, probs[availables]), v.item()
 
-        mcts = MCTS(policy_fn, n_playout=400) # 自我对弈搜索量，5090可适当调高
+        mcts = MCTS(policy_fn, 400)# 自我对弈搜索量，5090可适当调高
         play_data = [] # 暂存本局数据
         states, probs, players = [], [], []
         step_count = 0
@@ -71,13 +70,6 @@ def train():
             move = np.random.choice(acts, p=p)
             board.do_move(move)
             step_count += 1
-            
-            # 维护 MCTS 树
-            if move in mcts.root.children:
-                mcts.root = mcts.root.children[move]
-                mcts.root.parent = None
-            else:
-                mcts.root = TreeNode(None, 1.0)
             
             end, winner = board.game_end()              
             if end:
