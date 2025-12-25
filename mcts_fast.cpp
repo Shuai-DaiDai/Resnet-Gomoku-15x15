@@ -49,7 +49,7 @@ public:
                 for (auto const& [move, prob] : action_probs) 
                     node->children[move] = new Node(node, prob);
             } else {
-                int winner = board_copy.attr("game_end")()[1].cast<int>();
+                int winner = board_copy.attr("game_end")().cast<py::tuple>()[1].cast<int>();
                 value = (winner == -1) ? 0.0f : -1.0f;
             }
 
