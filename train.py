@@ -59,7 +59,7 @@ def train():
         while True:
             # 探索与收敛策略
             temp = 1.0 if step_count < 30 else 1e-3
-            acts, p = mcts.get_move_probs(board, temp=temp)
+            acts, p = mcts.get_move_probs(board, temp)
             
             full_p = np.zeros(width*height)
             full_p[list(acts)] = p
