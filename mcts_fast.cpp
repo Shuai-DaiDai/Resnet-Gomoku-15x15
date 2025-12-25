@@ -8,7 +8,6 @@
 
 namespace py = pybind11;
 
-// 使用结构体管理节点，简化指针逻辑
 struct Node {
     float P;
     float Q = 0, W = 0;
@@ -24,7 +23,6 @@ public:
     MCTS(py::function policy_fn, int n_playout) : policy_fn(policy_fn), n_playout(n_playout) {}
 
     py::tuple get_move_probs(py::object board, float temp) {
-        // 每次搜索创建新树，搜索完自动销毁，彻底杜绝段错误
         std::unique_ptr<Node> root_ptr(new Node(nullptr, 1.0));
         Node* root = root_ptr.get();
         
@@ -32,7 +30,6 @@ public:
             py::object board_copy = board.attr("copy")();
             Node* node = root;
             
-            // 1. Selection
             while (!node->children.empty()) {
                 float best_u = -1e9;
                 int best_move = -1;
@@ -45,14 +42,12 @@ public:
                 node = node->children[best_move];
             }
 
-            // 2. Expansion & Evaluation
             py::tuple res = policy_fn(board_copy);
             auto action_probs = res[0].cast<std::vector<std::pair<int, float>>>();
             float value = res[1].cast<float>();
             
             py::tuple end_res = board_copy.attr("game_end")().cast<py::tuple>();
-            bool is_end = end_res[0].cast<bool>();
-            if (!is_end) {
+            if (!end_res[0].cast<bool>()) {
                 for (auto const& [move, prob] : action_probs) 
                     node->children[move] = new Node(node, prob);
             } else {
@@ -60,7 +55,6 @@ public:
                 value = (winner == -1) ? 0.0f : -1.0f;
             }
 
-            // 3. Backpropagation
             while (node) {
                 node->N++;
                 node->W += value;
@@ -72,22 +66,37 @@ public:
 
         std::vector<int> acts;
         std::vector<float> probs;
-        if (root->children.empty()) {
+        float sum_p = 0;
+        
+        // 数值稳定性改进：处理 temp 趋于 0 的情况
+        if (temp < 1e-3) {
+            int best_move = -1;
+            int max_n = -1;
+            for (auto const& [move, child] : root->children) {
+                if (child->N > max_n) { max_n = child->N; best_move = move; }
+            }
+            acts.push_back(best_move);
+            probs.push_back(1.0f);
+        } else {
+            for (auto const& [move, child] : root->children) {
+                acts.push_back(move);
+                float p = pow((float)child->N + 1e-10f, 1.0f/temp); // 增加 epsilon
+                probs.push_back(p);
+                sum_p += p;
+            }
+            // 最终归一化，确保概率之和为 1 且无 NaN
+            for (float &p : probs) p /= (sum_p + 1e-10f);
+        }
+        
+        // 如果依然为空的极端防御逻辑
+        if (acts.empty()) {
             py::list avail = board.attr("availables");
             for (auto m : avail) {
                 acts.push_back(m.cast<int>());
                 probs.push_back(1.0f / avail.size());
             }
-        } else {
-            float sum_n = 0;
-            for (auto const& [move, child] : root->children) {
-                acts.push_back(move);
-                float p = pow(child->N, 1.0/temp);
-                probs.push_back(p);
-                sum_n += p;
-            }
-            for (float &p : probs) p /= sum_n;
         }
+
         return py::make_tuple(acts, probs);
     }
 
