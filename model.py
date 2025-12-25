@@ -1,10 +1,12 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
-# 强制检测并打印设备
+# 设置设备：如果有 MPS 则使用 MPS，否则使用 CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"--- 系统检测到设备: {device} ---")
 if device.type == 'cpu':
-    print("警告：未检测到显卡，请检查驱动或 PyTorch 版本！")
+    print("警告：未检测到显卡，请检查驱动或 PyTorch 版本！")    
 
 class ResBlock(nn.Module):
     def __init__(self, channels):
