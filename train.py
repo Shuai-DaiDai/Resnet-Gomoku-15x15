@@ -1,3 +1,6 @@
+from typing import Any
+
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -47,8 +50,7 @@ def train():
             with torch.no_grad():
                 log_p, v = net(state)
             probs = np.exp(log_p.cpu().numpy().flatten())
-            occupied = b.bitboards[1] | b.bitboards[2]
-            availables = [idx for idx in range(width*height) if not (occupied >> idx) & 1]
+            availables = b.availables 
             return zip(availables, probs[availables]), v.item()
 
         mcts = MCTS(policy_fn, 400)# 自我对弈搜索量，5090可适当调高
