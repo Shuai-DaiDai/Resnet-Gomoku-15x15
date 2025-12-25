@@ -74,8 +74,8 @@ public:
                 probs.push_back(1.0f / avail.size());
             }
         } else {
-            // 数值稳定性保护：处理 temp 趋于 0 的情况
-            if (temp < 1e-3) {
+            // --- 核心修复：极致数值稳定性 ---
+            if (temp < 1e-2) { // 如果温度极低，直接取 N 最大的动作
                 int best_move = -1; int max_n = -1;
                 for (auto const& [move, child] : root->children) {
                     if (child->N > max_n) { max_n = child->N; best_move = move; }
@@ -83,20 +83,20 @@ public:
                 acts.push_back(best_move);
                 probs.push_back(1.0f);
             } else {
-                float sum_p = 0;
-                // 找出最大 N 用于平滑
-                int max_n = 0;
-                for (auto const& [move, child] : root->children) max_n = std::max(max_n, child->N);
-
+                double sum_p = 0; // 使用 double 提高精度
                 for (auto const& [move, child] : root->children) {
                     acts.push_back(move);
-                    // 核心修复：增加极小值偏移，并防止指数过大
-                    float p = pow((float)child->N + 1e-8f, 1.0f / temp);
-                    probs.push_back(p);
+                    // 增加极小值偏移并限制指数范围，彻底杜绝 NaN
+                    double p = std::pow((double)child->N + 1e-10, 1.0 / (double)temp);
+                    probs.push_back((float)p);
                     sum_p += p;
                 }
-                // 归一化，带上 epsilon 防止除以 0 产生 NaN
-                for (float &p : probs) p /= (sum_p + 1e-10f);
+                // 归一化，如果 sum_p 太小则均匀分布，防止产生 NaN
+                if (sum_p < 1e-15) {
+                    for (float &p : probs) p = 1.0f / probs.size();
+                } else {
+                    for (float &p : probs) p /= (float)sum_p;
+                }
             }
         }
         return py::make_tuple(acts, probs);
