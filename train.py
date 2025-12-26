@@ -1,3 +1,4 @@
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import torch.multiprocessing as mp
 import multiprocessing
@@ -106,8 +107,8 @@ def train():
     n_in_row = 5
     n_playout = 2000
     num_workers = 8        # 5090 建议 6-8 个工人
-    batch_size = 10240      # 5090 甜点位 Batch
-    buffer_maxlen = 100000
+    batch_size = 4096      # 5090 甜点位 Batch
+    buffer_maxlen = 50000
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if not os.path.exists('./models'): os.makedirs('./models')
