@@ -1,6 +1,4 @@
 from typing import Any
-
-
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -114,7 +112,7 @@ def train():
                 print(f"轮次 {i+1}, Buffer大小: {len(buffer)}, 损失Loss: {loss.item():.4f}")
 
         # --- 存盘逻辑：适配云端路径 ---
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 100 == 0:
             save_path = f'./models/gomoku_15x15_{i+1}.pth'
             torch.save(net.state_dict(), save_path)
             # 同时更新一个最新版
