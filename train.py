@@ -1,45 +1,55 @@
-from typing import Any
 import torch
 import torch.nn.functional as F
 import numpy as np
 from collections import deque
 import random
 import os
-from model import Net, device # 确保云端 model.py 的 device 为 "cuda"
-from mcts_pure import BitBoard, MCTS
-import multiprocessing as mp
+import time
+import gc
 import resource
-import time # 在文件顶端添加
 import torch.multiprocessing as mp
-# 强制使用 file_system 策略，有效缓解 "Too many open files" 报错
+from model import Net, device
+from mcts_pure import BitBoard, MCTS
+
+# 1. 基础设置：彻底缓解句柄压力
 mp.set_sharing_strategy('file_system')
 
 def get_equi_data(play_data, width, height):
-    """数据增强：通过旋转和翻转，将1局棋的数据量提升8倍"""
     extend_data = []
     for state, mcts_prob, winner in play_data:
         for i in [1, 2, 3, 4]:
-            # 旋转镜像操作
             equi_state = np.array([np.rot90(s, i) for s in state])
             equi_mcts_prob = np.rot90(mcts_prob.reshape(height, width), i)
             extend_data.append((equi_state, equi_mcts_prob.flatten(), winner))
-            # 水平翻转操作
             equi_state = np.array([np.fliplr(s) for s in equi_state])
             equi_mcts_prob = np.fliplr(equi_mcts_prob)
             extend_data.append((equi_state, equi_mcts_prob.flatten(), winner))
     return extend_data
 
-def collect_self_play_data(width, height, n_in_row, n_playout, net_weights, device):
-    """子进程工人：运行一局自我对弈并返回数据"""
-    # 局部初始化，确保每个进程有自己的资源空间
+def worker_loop(width, height, n_in_row, n_playout, input_queue, output_queue):
+    """持久化工人：启动后常驻显存，避免反复创建进程产生的句柄堆积"""
+    # 每个进程内部初始化自己的网络副本
     local_net = Net(width, height, n_res_blocks=40).to(device)
-    local_net.load_state_dict(net_weights)
     local_net.eval()
     
+    while True:
+        # 1. 获取主进程发来的最新权重
+        weights = input_queue.get()
+        if weights is None: break # 退出信号
+        local_net.load_state_dict(weights)
+        
+        # 2. 进行一局自我对弈
+        play_data = run_self_play(width, height, n_in_row, n_playout, local_net)
+        
+        # 3. 将数据送回主进程
+        output_queue.put(play_data)
+
+def run_self_play(width, height, n_in_row, n_playout, net):
+    """单局对弈逻辑，包含报错修复的归一化"""
     def policy_fn(b):
         state = torch.FloatTensor(b.current_state()).unsqueeze(0).to(device)
         with torch.no_grad():
-            log_p, v = local_net(state)
+            log_p, v = net(state)
         probs = np.exp(log_p.cpu().numpy().flatten())
         return zip(b.availables, probs[b.availables]), v.item()
 
@@ -58,14 +68,14 @@ def collect_self_play_data(width, height, n_in_row, n_playout, net_weights, devi
         probs.append(full_p)
         players.append(board.current_player)
 
-        # 强制转换为 float64 并重新归一化，确保严丝合缝等于 1，消除精度报错
+        # 核心修复：强制高精度归一化，防止 ValueError
         p = np.array(p).astype('float64')
-        p /= p.sum()    
+        p /= p.sum()
         move = np.random.choice(acts, p=p)
+        
         board.do_move(move)
         step_count += 1
-        
-        end, winner = board.game_end()              
+        end, winner = board.game_end()
         if end:
             z = np.zeros(len(players))
             if winner != -1:
@@ -74,69 +84,54 @@ def collect_self_play_data(width, height, n_in_row, n_playout, net_weights, devi
             return list(zip(states, probs, z))
 
 def train():
-    # --- 15x15 配置区 ---
-    width, height, n_in_row = 15, 15, 5
-    # 5090 显存够大，直接上 20 层残差块提取深层逻辑
-    net = Net(width, height, n_res_blocks=40).to(device)
-    net = torch.compile(net) # 只需要加这一行
-    optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
-    model_file = './models/gomoku_latest.pth'
-    num_workers = 10  # 5090 性能强劲，建议开 6 个并行下棋进程
-    pool = mp.Pool(processes=num_workers)
-    data_tasks = []
-
-    if os.path.exists(model_file):
-        print(f"--- 发现预训练模型 {model_file}，正在加载并继续训练 ---")
-        net.load_state_dict(torch.load(model_file, map_location=device))
-    else:
-        print("--- 未发现存档文件，将从随机初始化开始训练 ---")
-    buffer = deque(maxlen=200000) # 增大经验池容量
+    # --- 参数区 (5090 极致压榨版) ---
+    width, height = 15, 15
+    n_in_row = 5
+    n_playout = 2000
+    num_workers = 8        # 5090 建议 6-8 个工人
+    batch_size = 6144      # 5090 甜点位 Batch
+    buffer_maxlen = 100000
     
-    # 5090 硬件加速：混合精度缩放器
-    scaler = torch.amp.GradScaler('cuda')
-
-    # 确保保存目录存在
     if not os.path.exists('./models'): os.makedirs('./models')
-
-    print(f"RTX 5090 专家级训练启动，设备: {device}, 棋盘: 15x15")
     
-    for i in range(100000): # 15x15 建议起步 20000 轮
-        # --- A. 派发新任务 ---
-        if len(data_tasks) < num_workers:
-            # 提取权重保持你的 clone().detach() 方案，这是对的
-            weights_cpu = {k: v.cpu().clone().detach() for k, v in net.state_dict().items()}
-            # 关键修改：去掉 while，改用单次派发
-            task = pool.apply_async(collect_self_play_data, 
-                                   args=(width, height, n_in_row, 2000, weights_cpu, device))
-            data_tasks.append(task)
-            
-            # 手动清理权重引用，强制释放内存
-            del weights_cpu
+    net = Net(width, height, n_res_blocks=40).to(device)
+    optimizer = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)
+    scaler = torch.amp.GradScaler('cuda')
+    buffer = deque(maxlen=buffer_maxlen)
 
-        # --- B. 检查并收集已完成的任务数据 ---
-        new_data_received = False # 在 B 循环开始前初始化
-        for task in data_tasks[:]:
-            if task.ready():
-                curr_play_data = task.get()
-                # 依然保持数据增强逻辑
-                enhanced_data = get_equi_data(curr_play_data, width, height)
-                buffer.extend(enhanced_data)
-                data_tasks.remove(task)
-                new_data_received = True # 核心：标记收到了新棋谱
+    # --- 启动持久化工进程 ---
+    input_queues = [mp.Queue(maxsize=1) for _ in range(num_workers)]
+    output_queue = mp.Queue()
+    
+    for j in range(num_workers):
+        p = mp.Process(target=worker_loop, args=(width, height, n_in_row, n_playout, input_queues[j], output_queue))
+        p.daemon = True
+        p.start()
+        # 初始权重同步
+        w = {k: v.cpu().clone().detach() for k, v in net.state_dict().items()}
+        input_queues[j].put(w)
+
+    print("--- 5090 炼丹炉已开启 (持久化进程模式) ---")
+
+    for i in range(100000):
+        # 1. 尽力收集产出的数据
+        new_data_count = 0
+        while not output_queue.empty():
+            data = output_queue.get()
+            buffer.extend(get_equi_data(data, width, height))
+            new_data_count += 1
         
-        # --- C. 神经网络参数更新 ---
-        if len(buffer) > 6144:
+        # 2. 如果 Buffer 够了，进行高强度训练
+        if len(buffer) >= batch_size:
             net.train()
-            # 5090 核心：直接开启 512 或 1024 大 Batch 训练
-            batch = random.sample(buffer, 6144)
+            batch = random.sample(buffer, batch_size)
             s_b, p_b, z_b = zip(*batch)
+            
             s_t = torch.FloatTensor(np.array(s_b)).to(device)
             p_t = torch.FloatTensor(np.array(p_b)).to(device)
             z_t = torch.FloatTensor(np.array(z_b)).to(device)
             
             optimizer.zero_grad()
-
-            # 混合精度上下文，自动分配 5090 算力
             with torch.amp.autocast('cuda'):
                 lp, v = net(s_t)
                 loss = -torch.mean(torch.sum(p_t * lp, dim=1)) + F.mse_loss(v.view(-1), z_t)
@@ -145,34 +140,25 @@ def train():
             scaler.step(optimizer)
             scaler.update()
 
+            # 权重更新后，通知工人领新权重 (每 5 轮同步一次即可)
+            if i % 5 == 0:
+                current_w = {k: v.cpu().clone().detach() for k, v in net.state_dict().items()}
+                for q in input_queues:
+                    if q.empty(): # 只有工人闲着才塞新权重，不堵塞队列
+                        q.put(current_w)
+
             if (i+1) % 10 == 0:
-                print(f"轮次 {i+1}, Buffer大小: {len(buffer)}, 损失Loss: {loss.item():.4f}")
+                print(f"轮次 {i+1}, Buffer: {len(buffer)}, Loss: {loss.item():.4f}")
         else:
-            # Buffer 不够时，强制休眠一小会儿给系统“喘息”时间
-            # 无论有没有收到新数据，都休息 0.5 秒，防止主循环疯狂空转产生句柄
-            import gc
-            gc.collect() # 强制执行垃圾回收
-            time.sleep(0.5)
-
-        # --- 存盘逻辑：适配云端路径 ---
+            time.sleep(1) # Buffer 不足，强制冷静
+            
+        # 3. 存档与清理
         if (i + 1) % 100 == 0:
-            save_path = f'./models/gomoku_15x15_{i+1}.pth'
-            torch.save(net.state_dict(), save_path)
-            # 同时更新一个最新版
             torch.save(net.state_dict(), './models/gomoku_latest.pth')
-            print(f"--- 存档完成: {save_path} ---")
+            gc.collect()
 
-if __name__ == "__main__":
-    # 1. 提升系统允许同时打开的文件句柄数，解决 "Too many open files" 报错
-    import resource
+if __name__ == '__main__':
+    # 句柄上限设为 65535
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (65535, hard))
-    
-    # 2. 强制设置进程启动模式为 spawn，这是 CUDA 多进程的硬性要求
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass
-        
-    # 3. 启动主训练逻辑
     train()
