@@ -9,6 +9,7 @@ from model import Net, device # 确保云端 model.py 的 device 为 "cuda"
 from mcts_pure import BitBoard, MCTS
 import multiprocessing as mp
 import resource
+import time # 在文件顶端添加
 
 def get_equi_data(play_data, width, height):
     """数据增强：通过旋转和翻转，将1局棋的数据量提升8倍"""
@@ -96,23 +97,25 @@ def train():
         # --- A. 派发新任务 ---
         # 如果当前运行的任务少于设定的并行数，则补齐任务
         # 只有当旧任务全部完成后，才开启新一轮并行下棋
-        if len(data_tasks) == 0:
+        # 将 if len(data_tasks) == 0: 改为 while 循环
+        while len(data_tasks) < num_workers:
             weights_cpu = {k: v.cpu() for k, v in net.state_dict().items()}
-            for _ in range(num_workers):
-                task = pool.apply_async(collect_self_play_data, 
-                                       args=(width, height, n_in_row, 2000, weights_cpu, device))
-                data_tasks.append(task)
+            task = pool.apply_async(collect_self_play_data, 
+                           args=(width, height, n_in_row, 2000, weights_cpu, device))
+            data_tasks.append(task)
 
         # --- B. 检查并收集已完成的任务数据 ---
         for task in data_tasks[:]:
+            new_data_received = False # 在 B 循环开始前初始化
             if task.ready():
                 curr_play_data = task.get()
                 # 依然保持数据增强逻辑
                 enhanced_data = get_equi_data(curr_play_data, width, height)
                 buffer.extend(enhanced_data)
                 data_tasks.remove(task)
+                new_data_received = True # 核心：标记收到了新棋谱
         
-        # --- 神经网络参数更新 ---
+        # --- C. 神经网络参数更新 ---
         if len(buffer) > 2048:
             net.train()
             # 5090 核心：直接开启 512 或 1024 大 Batch 训练
@@ -124,6 +127,12 @@ def train():
             
             optimizer.zero_grad()
             
+        else:
+            # 【关键修复】如果 Buffer 不够且没有新数据进来，休眠 1 秒，防止空转
+            if not new_data_received:
+                time.sleep(1)
+                continue # 跳过本次循环，不触发下面的 i 计数和存盘
+
             # 混合精度上下文，自动分配 5090 算力
             with torch.amp.autocast('cuda'):
                 lp, v = net(s_t)
@@ -145,18 +154,16 @@ def train():
             print(f"--- 存档完成: {save_path} ---")
 
 if __name__ == "__main__":
-    # 强制设置进程启动模式，这对 CUDA 程序的稳定性至关重要
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass
-    # 提升系统允许同时打开的文件句柄数
+    # 1. 提升系统允许同时打开的文件句柄数，解决 "Too many open files" 报错
+    import resource
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (4096, hard))
     
-    # 原有的 spawn 设置
+    # 2. 强制设置进程启动模式为 spawn，这是 CUDA 多进程的硬性要求
     try:
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
         pass
+        
+    # 3. 启动主训练逻辑
     train()
