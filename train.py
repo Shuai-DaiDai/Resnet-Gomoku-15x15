@@ -81,7 +81,7 @@ def train():
     net = torch.compile(net) # 只需要加这一行
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
     model_file = './models/gomoku_latest.pth'
-    num_workers = 8  # 5090 性能强劲，建议开 6 个并行下棋进程
+    num_workers = 10  # 5090 性能强劲，建议开 6 个并行下棋进程
     pool = mp.Pool(processes=num_workers)
     data_tasks = []
 
@@ -106,7 +106,7 @@ def train():
         # --- A. 派发新任务 ---
         if len(data_tasks) < num_workers:
             # 只有在确定要开新进程时，才提取一次权重
-            weights_cpu = {k: v.cpu() for k, v in net.state_dict().items()}
+            weights_cpu = {k: v.cpu().clone().detach() for k, v in net.state_dict().items()}
             while len(data_tasks) < num_workers:
                 task = pool.apply_async(collect_self_play_data, 
                                        args=(width, height, n_in_row, 2000, weights_cpu, device))
@@ -165,7 +165,7 @@ if __name__ == "__main__":
     # 1. 提升系统允许同时打开的文件句柄数，解决 "Too many open files" 报错
     import resource
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (4096, hard))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (65535, hard))
     
     # 2. 强制设置进程启动模式为 spawn，这是 CUDA 多进程的硬性要求
     try:
