@@ -27,7 +27,7 @@ def train():
     # --- 15x15 配置区 ---
     width, height, n_in_row = 15, 15, 5
     # 5090 显存够大，直接上 20 层残差块提取深层逻辑
-    net = Net(width, height, n_res_blocks=20).to(device)
+    net = Net(width, height, n_res_blocks=40).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
     model_file = './models/gomoku_latest.pth'
     if os.path.exists(model_file):
@@ -57,7 +57,7 @@ def train():
             availables = b.availables 
             return zip(availables, probs[availables]), v.item()
 
-        mcts = MCTS(policy_fn, 400)# 自我对弈搜索量，5090可适当调高
+        mcts = MCTS(policy_fn, 2000)# 自我对弈搜索量，5090可适当调高
         play_data = [] # 暂存本局数据
         states, probs, players = [], [], []
         step_count = 0
@@ -94,10 +94,10 @@ def train():
                 break
         
         # --- 神经网络参数更新 ---
-        if len(buffer) > 1024:
+        if len(buffer) > 2048:
             net.train()
             # 5090 核心：直接开启 512 或 1024 大 Batch 训练
-            batch = random.sample(buffer, 512)
+            batch = random.sample(buffer, 2048)
             s_b, p_b, z_b = zip(*batch)
             s_t = torch.FloatTensor(np.array(s_b)).to(device)
             p_t = torch.FloatTensor(np.array(p_b)).to(device)
