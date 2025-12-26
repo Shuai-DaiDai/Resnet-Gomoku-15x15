@@ -100,17 +100,18 @@ def train():
 
     print(f"RTX 5090 专家级训练启动，设备: {device}, 棋盘: 15x15")
     
-    for i in range(50000): # 15x15 建议起步 20000 轮
-#        --- A. 派发新任务 ---
-        # 只有在任务数不足时才派发，且派发前确认当前 Buffer 情况
+    for i in range(100000): # 15x15 建议起步 20000 轮
         # --- A. 派发新任务 ---
         if len(data_tasks) < num_workers:
-            # 只有在确定要开新进程时，才提取一次权重
+            # 提取权重保持你的 clone().detach() 方案，这是对的
             weights_cpu = {k: v.cpu().clone().detach() for k, v in net.state_dict().items()}
-            while len(data_tasks) < num_workers:
-                task = pool.apply_async(collect_self_play_data, 
-                                       args=(width, height, n_in_row, 2000, weights_cpu, device))
-                data_tasks.append(task)
+            # 关键修改：去掉 while，改用单次派发
+            task = pool.apply_async(collect_self_play_data, 
+                                   args=(width, height, n_in_row, 2000, weights_cpu, device))
+            data_tasks.append(task)
+            
+            # 手动清理权重引用，强制释放内存
+            del weights_cpu
 
         # --- B. 检查并收集已完成的任务数据 ---
         new_data_received = False # 在 B 循环开始前初始化
@@ -151,7 +152,7 @@ def train():
             # 无论有没有收到新数据，都休息 0.5 秒，防止主循环疯狂空转产生句柄
             import gc
             gc.collect() # 强制执行垃圾回收
-            time.sleep(1)
+            time.sleep(0.5)
 
         # --- 存盘逻辑：适配云端路径 ---
         if (i + 1) % 100 == 0:
