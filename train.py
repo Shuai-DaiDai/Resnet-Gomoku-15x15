@@ -81,7 +81,7 @@ def train():
     net = torch.compile(net) # 只需要加这一行
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
     model_file = './models/gomoku_latest.pth'
-    num_workers = 4  # 5090 性能强劲，建议开 6 个并行下棋进程
+    num_workers = 8  # 5090 性能强劲，建议开 6 个并行下棋进程
     pool = mp.Pool(processes=num_workers)
     data_tasks = []
 
@@ -102,14 +102,13 @@ def train():
     
     for i in range(50000): # 15x15 建议起步 20000 轮
         # --- A. 派发新任务 ---
-        # 如果当前运行的任务少于设定的并行数，则补齐任务
-        # 只有当旧任务全部完成后，才开启新一轮并行下棋
-        # 将 if len(data_tasks) == 0: 改为 while 循环
-        while len(data_tasks) < num_workers:
+        # 修正：只有当所有旧任务都处理完了，或者刚启动时，才派发新一波
+        if len(data_tasks) == 0:
             weights_cpu = {k: v.cpu() for k, v in net.state_dict().items()}
-            task = pool.apply_async(collect_self_play_data, 
-                           args=(width, height, n_in_row, 2000, weights_cpu, device))
-            data_tasks.append(task)
+            for _ in range(num_workers):
+                task = pool.apply_async(collect_self_play_data, 
+                                       args=(width, height, n_in_row, 2000, weights_cpu, device))
+                data_tasks.append(task)
 
         # --- B. 检查并收集已完成的任务数据 ---
         for task in data_tasks[:]:
@@ -123,22 +122,16 @@ def train():
                 new_data_received = True # 核心：标记收到了新棋谱
         
         # --- C. 神经网络参数更新 ---
-        if len(buffer) > 4096:
+        if len(buffer) > 6144:
             net.train()
             # 5090 核心：直接开启 512 或 1024 大 Batch 训练
-            batch = random.sample(buffer, 4096)
+            batch = random.sample(buffer, 6144)
             s_b, p_b, z_b = zip(*batch)
             s_t = torch.FloatTensor(np.array(s_b)).to(device)
             p_t = torch.FloatTensor(np.array(p_b)).to(device)
             z_t = torch.FloatTensor(np.array(z_b)).to(device)
             
             optimizer.zero_grad()
-            
-        else:
-            # 【关键修复】如果 Buffer 不够且没有新数据进来，休眠 1 秒，防止空转
-            if not new_data_received:
-                time.sleep(1)
-                continue # 跳过本次循环，不触发下面的 i 计数和存盘
 
             # 混合精度上下文，自动分配 5090 算力
             with torch.amp.autocast('cuda'):
@@ -148,11 +141,13 @@ def train():
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-            # --- 增加这一行，防止主进程跑太快导致句柄堆积 ---
-            time.sleep(0.5)
-            
+
             if (i+1) % 10 == 0:
                 print(f"轮次 {i+1}, Buffer大小: {len(buffer)}, 损失Loss: {loss.item():.4f}")
+        else:
+            # Buffer 不够时，休眠防止空转 CPU
+            if not new_data_received:
+                time.sleep(1)
 
         # --- 存盘逻辑：适配云端路径 ---
         if (i + 1) % 100 == 0:
