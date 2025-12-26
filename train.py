@@ -54,7 +54,10 @@ def collect_self_play_data(width, height, n_in_row, n_playout, net_weights, devi
         states.append(board.current_state())
         probs.append(full_p)
         players.append(board.current_player)
-            
+
+        # 强制转换为 float64 并重新归一化，确保严丝合缝等于 1，消除精度报错
+        p = np.array(p).astype('float64')
+        p /= p.sum()    
         move = np.random.choice(acts, p=p)
         board.do_move(move)
         step_count += 1
@@ -72,9 +75,10 @@ def train():
     width, height, n_in_row = 15, 15, 5
     # 5090 显存够大，直接上 20 层残差块提取深层逻辑
     net = Net(width, height, n_res_blocks=40).to(device)
+    net = torch.compile(net) # 只需要加这一行
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
     model_file = './models/gomoku_latest.pth'
-    num_workers = 6  # 5090 性能强劲，建议开 6 个并行下棋进程
+    num_workers = 8  # 5090 性能强劲，建议开 6 个并行下棋进程
     pool = mp.Pool(processes=num_workers)
     data_tasks = []
 
@@ -93,7 +97,7 @@ def train():
 
     print(f"RTX 5090 专家级训练启动，设备: {device}, 棋盘: 15x15")
     
-    for i in range(50000): # 15x15 建议起步 20000 轮
+    for i in range(100000): # 15x15 建议起步 20000 轮
         # --- A. 派发新任务 ---
         # 如果当前运行的任务少于设定的并行数，则补齐任务
         # 只有当旧任务全部完成后，才开启新一轮并行下棋
@@ -116,10 +120,10 @@ def train():
                 new_data_received = True # 核心：标记收到了新棋谱
         
         # --- C. 神经网络参数更新 ---
-        if len(buffer) > 2048:
+        if len(buffer) > 8192:
             net.train()
             # 5090 核心：直接开启 512 或 1024 大 Batch 训练
-            batch = random.sample(buffer, 2048)
+            batch = random.sample(buffer, 8192)
             s_b, p_b, z_b = zip(*batch)
             s_t = torch.FloatTensor(np.array(s_b)).to(device)
             p_t = torch.FloatTensor(np.array(p_b)).to(device)
