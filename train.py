@@ -81,7 +81,7 @@ def train():
     net = torch.compile(net) # 只需要加这一行
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
     model_file = './models/gomoku_latest.pth'
-    num_workers = 6  # 5090 性能强劲，建议开 6 个并行下棋进程
+    num_workers = 4  # 5090 性能强劲，建议开 6 个并行下棋进程
     pool = mp.Pool(processes=num_workers)
     data_tasks = []
 
@@ -149,7 +149,7 @@ def train():
             scaler.step(optimizer)
             scaler.update()
             # --- 增加这一行，防止主进程跑太快导致句柄堆积 ---
-            time.sleep(0.05)
+            time.sleep(0.5)
             
             if (i+1) % 10 == 0:
                 print(f"轮次 {i+1}, Buffer大小: {len(buffer)}, 损失Loss: {loss.item():.4f}")
