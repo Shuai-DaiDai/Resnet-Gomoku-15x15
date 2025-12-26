@@ -81,7 +81,7 @@ def train():
     net = torch.compile(net) # 只需要加这一行
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
     model_file = './models/gomoku_latest.pth'
-    num_workers = 8  # 5090 性能强劲，建议开 6 个并行下棋进程
+    num_workers = 6  # 5090 性能强劲，建议开 6 个并行下棋进程
     pool = mp.Pool(processes=num_workers)
     data_tasks = []
 
