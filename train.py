@@ -7,6 +7,7 @@ import random
 import os
 from model import Net, device # 确保云端 model.py 的 device 为 "cuda"
 from mcts_pure import BitBoard, MCTS
+import multiprocessing as mp
 
 def get_equi_data(play_data, width, height):
     """数据增强：通过旋转和翻转，将1局棋的数据量提升8倍"""
@@ -23,6 +24,47 @@ def get_equi_data(play_data, width, height):
             extend_data.append((equi_state, equi_mcts_prob.flatten(), winner))
     return extend_data
 
+def collect_self_play_data(width, height, n_in_row, n_playout, net_weights, device):
+    """子进程工人：运行一局自我对弈并返回数据"""
+    # 局部初始化，确保每个进程有自己的资源空间
+    local_net = Net(width, height, n_res_blocks=40).to(device)
+    local_net.load_state_dict(net_weights)
+    local_net.eval()
+    
+    def policy_fn(b):
+        state = torch.FloatTensor(b.current_state()).unsqueeze(0).to(device)
+        with torch.no_grad():
+            log_p, v = local_net(state)
+        probs = np.exp(log_p.cpu().numpy().flatten())
+        return zip(b.availables, probs[b.availables]), v.item()
+
+    board = BitBoard(width, height, n_in_row=n_in_row)
+    mcts = MCTS(policy_fn, n_playout)
+    states, probs, players = [], [], []
+    step_count = 0
+    
+    while True:
+        temp = 1.0 if step_count < 30 else 1e-3
+        acts, p = mcts.get_move_probs(board, temp)
+        
+        full_p = np.zeros(width * height)
+        full_p[list(acts)] = p
+        states.append(board.current_state())
+        probs.append(full_p)
+        players.append(board.current_player)
+            
+        move = np.random.choice(acts, p=p)
+        board.do_move(move)
+        step_count += 1
+        
+        end, winner = board.game_end()              
+        if end:
+            z = np.zeros(len(players))
+            if winner != -1:
+                z[np.array(players) == winner] = 1.0
+                z[np.array(players) != winner] = -1.0
+            return list(zip(states, probs, z))
+
 def train():
     # --- 15x15 配置区 ---
     width, height, n_in_row = 15, 15, 5
@@ -30,12 +72,16 @@ def train():
     net = Net(width, height, n_res_blocks=40).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
     model_file = './models/gomoku_latest.pth'
+    num_workers = 6  # 5090 性能强劲，建议开 6 个并行下棋进程
+    pool = mp.Pool(processes=num_workers)
+    data_tasks = []
+
     if os.path.exists(model_file):
         print(f"--- 发现预训练模型 {model_file}，正在加载并继续训练 ---")
         net.load_state_dict(torch.load(model_file, map_location=device))
     else:
         print("--- 未发现存档文件，将从随机初始化开始训练 ---")
-    buffer = deque(maxlen=10000) # 增大经验池容量
+    buffer = deque(maxlen=200000) # 增大经验池容量
     
     # 5090 硬件加速：混合精度缩放器
     scaler = torch.amp.GradScaler('cuda')
@@ -45,53 +91,24 @@ def train():
 
     print(f"RTX 5090 专家级训练启动，设备: {device}, 棋盘: 15x15")
     
-    for i in range(20000): # 15x15 建议起步 20000 轮
-        board = BitBoard(width, height, n_in_row=n_in_row)
-        # 自我对弈逻辑定义
-        def policy_fn(b):
-            state = torch.FloatTensor(b.current_state()).unsqueeze(0).to(device)
-            net.eval()
-            with torch.no_grad():
-                log_p, v = net(state)
-            probs = np.exp(log_p.cpu().numpy().flatten())
-            availables = b.availables 
-            return zip(availables, probs[availables]), v.item()
+    for i in range(50000): # 15x15 建议起步 20000 轮
+        # --- A. 派发新任务 ---
+        # 如果当前运行的任务少于设定的并行数，则补齐任务
+        while len(data_tasks) < num_workers:
+            # 提取当前显卡上的最新权重，转到 CPU 准备分发给子进程
+            weights_cpu = {k: v.cpu() for k, v in net.state_dict().items()}
+            task = pool.apply_async(collect_self_play_data, 
+                                   args=(width, height, n_in_row, 2000, weights_cpu, device))
+            data_tasks.append(task)
 
-        mcts = MCTS(policy_fn, 2000)# 自我对弈搜索量，5090可适当调高
-        play_data = [] # 暂存本局数据
-        states, probs, players = [], [], []
-        step_count = 0
-        
-        while True:
-            # 探索与收敛策略
-            temp = 1.0 if step_count < 30 else 1e-3
-            acts, p = mcts.get_move_probs(board, temp)
-            
-            p = np.array(p).astype('float64')
-            p /= np.sum(p)
-
-            full_p = np.zeros(width*height)
-            full_p[list(acts)] = p
-            states.append(board.current_state())
-            probs.append(full_p)
-            players.append(board.current_player)
-                
-            move = np.random.choice(acts, p=p)
-            board.do_move(move)
-            step_count += 1
-            
-            end, winner = board.game_end()              
-            if end:
-                z = np.zeros(len(players))
-                if winner != -1:
-                    z[np.array(players) == winner] = 1.0
-                    z[np.array(players) != winner] = -1.0
-                
-                # 进行数据增强并存入 Buffer
-                curr_play_data = list(zip(states, probs, z))
+        # --- B. 检查并收集已完成的任务数据 ---
+        for task in data_tasks[:]:
+            if task.ready():
+                curr_play_data = task.get()
+                # 依然保持数据增强逻辑
                 enhanced_data = get_equi_data(curr_play_data, width, height)
                 buffer.extend(enhanced_data)
-                break
+                data_tasks.remove(task)
         
         # --- 神经网络参数更新 ---
         if len(buffer) > 2048:
@@ -126,4 +143,9 @@ def train():
             print(f"--- 存档完成: {save_path} ---")
 
 if __name__ == "__main__":
+    # 强制设置进程启动模式，这对 CUDA 程序的稳定性至关重要
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
     train()
