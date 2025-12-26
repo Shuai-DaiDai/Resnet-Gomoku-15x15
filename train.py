@@ -29,6 +29,12 @@ def train():
     # 5090 显存够大，直接上 20 层残差块提取深层逻辑
     net = Net(width, height, n_res_blocks=20).to(device)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
+    model_file = './models/gomoku_latest.pth'
+    if os.path.exists(model_file):
+        print(f"--- 发现预训练模型 {model_file}，正在加载并继续训练 ---")
+        net.load_state_dict(torch.load(model_file, map_location=device))
+    else:
+        print("--- 未发现存档文件，将从随机初始化开始训练 ---")
     buffer = deque(maxlen=10000) # 增大经验池容量
     
     # 5090 硬件加速：混合精度缩放器
