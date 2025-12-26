@@ -163,7 +163,7 @@ if __name__ == "__main__":
     # 1. 提升系统允许同时打开的文件句柄数，解决 "Too many open files" 报错
     import resource
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (4096, hard))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (6144, hard))
     
     # 2. 强制设置进程启动模式为 spawn，这是 CUDA 多进程的硬性要求
     try:
