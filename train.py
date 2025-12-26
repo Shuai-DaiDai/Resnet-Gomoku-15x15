@@ -10,6 +10,9 @@ from mcts_pure import BitBoard, MCTS
 import multiprocessing as mp
 import resource
 import time # 在文件顶端添加
+import torch.multiprocessing as mp
+# 强制使用 file_system 策略，有效缓解 "Too many open files" 报错
+mp.set_sharing_strategy('file_system')
 
 def get_equi_data(play_data, width, height):
     """数据增强：通过旋转和翻转，将1局棋的数据量提升8倍"""
@@ -97,7 +100,7 @@ def train():
 
     print(f"RTX 5090 专家级训练启动，设备: {device}, 棋盘: 15x15")
     
-    for i in range(100000): # 15x15 建议起步 20000 轮
+    for i in range(50000): # 15x15 建议起步 20000 轮
         # --- A. 派发新任务 ---
         # 如果当前运行的任务少于设定的并行数，则补齐任务
         # 只有当旧任务全部完成后，才开启新一轮并行下棋
@@ -120,10 +123,10 @@ def train():
                 new_data_received = True # 核心：标记收到了新棋谱
         
         # --- C. 神经网络参数更新 ---
-        if len(buffer) > 4096:
+        if len(buffer) > 5120:
             net.train()
             # 5090 核心：直接开启 512 或 1024 大 Batch 训练
-            batch = random.sample(buffer, 4096)
+            batch = random.sample(buffer, 5120)
             s_b, p_b, z_b = zip(*batch)
             s_t = torch.FloatTensor(np.array(s_b)).to(device)
             p_t = torch.FloatTensor(np.array(p_b)).to(device)
@@ -134,7 +137,7 @@ def train():
         else:
             # 【关键修复】如果 Buffer 不够且没有新数据进来，休眠 1 秒，防止空转
             if not new_data_received:
-                time.sleep(1)
+                time.sleep(0.05)
                 continue # 跳过本次循环，不触发下面的 i 计数和存盘
 
             # 混合精度上下文，自动分配 5090 算力
@@ -163,7 +166,7 @@ if __name__ == "__main__":
     # 1. 提升系统允许同时打开的文件句柄数，解决 "Too many open files" 报错
     import resource
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (4096, hard))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (5120, hard))
     
     # 2. 强制设置进程启动模式为 spawn，这是 CUDA 多进程的硬性要求
     try:
