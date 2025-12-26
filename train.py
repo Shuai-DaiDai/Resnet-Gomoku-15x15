@@ -8,6 +8,7 @@ import os
 from model import Net, device # 确保云端 model.py 的 device 为 "cuda"
 from mcts_pure import BitBoard, MCTS
 import multiprocessing as mp
+import resource
 
 def get_equi_data(play_data, width, height):
     """数据增强：通过旋转和翻转，将1局棋的数据量提升8倍"""
