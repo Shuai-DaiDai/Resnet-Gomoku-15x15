@@ -76,7 +76,7 @@ def run_game():
         if move in ai_player.root.children:
             ai_player.root = ai_player.root.children[move]
             ai_player.root.parent = None
-        else: ai_player.root = TreeNode(None, 1.0)
+        else: ai_player.root = Node(None, 1.0)
 
 if __name__ == "__main__":
     run_game()
