@@ -94,12 +94,13 @@ def train():
     for i in range(50000): # 15x15 建议起步 20000 轮
         # --- A. 派发新任务 ---
         # 如果当前运行的任务少于设定的并行数，则补齐任务
-        while len(data_tasks) < num_workers:
-            # 提取当前显卡上的最新权重，转到 CPU 准备分发给子进程
+        # 只有当旧任务全部完成后，才开启新一轮并行下棋
+        if len(data_tasks) == 0:
             weights_cpu = {k: v.cpu() for k, v in net.state_dict().items()}
-            task = pool.apply_async(collect_self_play_data, 
-                                   args=(width, height, n_in_row, 2000, weights_cpu, device))
-            data_tasks.append(task)
+            for _ in range(num_workers):
+                task = pool.apply_async(collect_self_play_data, 
+                                       args=(width, height, n_in_row, 2000, weights_cpu, device))
+                data_tasks.append(task)
 
         # --- B. 检查并收集已完成的任务数据 ---
         for task in data_tasks[:]:
@@ -144,6 +145,15 @@ def train():
 
 if __name__ == "__main__":
     # 强制设置进程启动模式，这对 CUDA 程序的稳定性至关重要
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+    # 提升系统允许同时打开的文件句柄数
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (4096, hard))
+    
+    # 原有的 spawn 设置
     try:
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
