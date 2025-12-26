@@ -101,18 +101,19 @@ def train():
     print(f"RTX 5090 专家级训练启动，设备: {device}, 棋盘: 15x15")
     
     for i in range(50000): # 15x15 建议起步 20000 轮
-        # --- A. 派发新任务 ---
-        # 修正：只有当所有旧任务都处理完了，或者刚启动时，才派发新一波
-        if len(data_tasks) == 0:
+#        --- A. 派发新任务 ---
+        # 只有在任务数不足时才派发，且派发前确认当前 Buffer 情况
+        while len(data_tasks) < num_workers:
             weights_cpu = {k: v.cpu() for k, v in net.state_dict().items()}
-            for _ in range(num_workers):
-                task = pool.apply_async(collect_self_play_data, 
-                                       args=(width, height, n_in_row, 2000, weights_cpu, device))
-                data_tasks.append(task)
+            task = pool.apply_async(collect_self_play_data, 
+                                   args=(width, height, n_in_row, 2000, weights_cpu, device))
+            data_tasks.append(task)
+            # 派发完一个立刻跳出，给主循环处理数据的机会，防止瞬间产生过多句柄
+            break
 
         # --- B. 检查并收集已完成的任务数据 ---
+        new_data_received = False # 在 B 循环开始前初始化
         for task in data_tasks[:]:
-            new_data_received = False # 在 B 循环开始前初始化
             if task.ready():
                 curr_play_data = task.get()
                 # 依然保持数据增强逻辑
@@ -145,9 +146,11 @@ def train():
             if (i+1) % 10 == 0:
                 print(f"轮次 {i+1}, Buffer大小: {len(buffer)}, 损失Loss: {loss.item():.4f}")
         else:
-            # Buffer 不够时，休眠防止空转 CPU
-            if not new_data_received:
-                time.sleep(1)
+            # Buffer 不够时，强制休眠一小会儿给系统“喘息”时间
+            # 无论有没有收到新数据，都休息 0.5 秒，防止主循环疯狂空转产生句柄
+            import gc
+            gc.collect() # 强制执行垃圾回收
+            time.sleep(0.5)
 
         # --- 存盘逻辑：适配云端路径 ---
         if (i + 1) % 100 == 0:
