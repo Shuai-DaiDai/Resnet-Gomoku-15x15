@@ -106,7 +106,7 @@ def train():
     n_in_row = 5
     n_playout = 2000
     num_workers = 8        # 5090 建议 6-8 个工人
-    batch_size = 6144      # 5090 甜点位 Batch
+    batch_size = 10240      # 5090 甜点位 Batch
     buffer_maxlen = 100000
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -174,6 +174,6 @@ def train():
         if (i + 1) % 100 == 0:
             torch.save(net.state_dict(), './models/gomoku_latest.pth')
             gc.collect()
-            
+
 if __name__ == '__main__':
     train()
