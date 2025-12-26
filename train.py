@@ -120,10 +120,10 @@ def train():
                 new_data_received = True # 核心：标记收到了新棋谱
         
         # --- C. 神经网络参数更新 ---
-        if len(buffer) > 8192:
+        if len(buffer) > 6144:
             net.train()
             # 5090 核心：直接开启 512 或 1024 大 Batch 训练
-            batch = random.sample(buffer, 8192)
+            batch = random.sample(buffer, 6144)
             s_b, p_b, z_b = zip(*batch)
             s_t = torch.FloatTensor(np.array(s_b)).to(device)
             p_t = torch.FloatTensor(np.array(p_b)).to(device)
@@ -145,6 +145,8 @@ def train():
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            # --- 增加这一行，防止主进程跑太快导致句柄堆积 ---
+            time.sleep(0.01)
             
             if (i+1) % 10 == 0:
                 print(f"轮次 {i+1}, Buffer大小: {len(buffer)}, 损失Loss: {loss.item():.4f}")
