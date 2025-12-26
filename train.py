@@ -137,7 +137,7 @@ def train():
         else:
             # 【关键修复】如果 Buffer 不够且没有新数据进来，休眠 1 秒，防止空转
             if not new_data_received:
-                time.sleep(0.05)
+                time.sleep(0.1)
                 continue # 跳过本次循环，不触发下面的 i 计数和存盘
 
             # 混合精度上下文，自动分配 5090 算力
@@ -149,7 +149,7 @@ def train():
             scaler.step(optimizer)
             scaler.update()
             # --- 增加这一行，防止主进程跑太快导致句柄堆积 ---
-            time.sleep(0.01)
+            time.sleep(0.05)
             
             if (i+1) % 10 == 0:
                 print(f"轮次 {i+1}, Buffer大小: {len(buffer)}, 损失Loss: {loss.item():.4f}")
