@@ -1,14 +1,29 @@
 import torch
-import torch.nn.functional as F
-import numpy as np
+import torch.multiprocessing as mp
+import multiprocessing
+import resource
+
+# --- 必须在所有 torch.cuda 操作之前调用 ---
+if __name__ == '__main__':
+    # 2. 提升系统句柄上限，解决 "Too many open files"
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (65535, hard))
+    # 1. 强制设置启动模式，防止 CUDA 冲突
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+
+
+
 from collections import deque
+import torch.nn.functional as F
 import random
 import os
 import time
 import gc
-import resource
-import torch.multiprocessing as mp
-from model import Net, device
+import numpy as np
+from model import Net
 from mcts_pure import BitBoard, MCTS
 
 # 1. 基础设置：彻底缓解句柄压力
@@ -26,10 +41,12 @@ def get_equi_data(play_data, width, height):
             extend_data.append((equi_state, equi_mcts_prob.flatten(), winner))
     return extend_data
 
-def worker_loop(width, height, n_in_row, n_playout, input_queue, output_queue):
+def worker_loop(width, height, n_in_row, n_playout, input_queue, output_queue,dev):
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    local_net = Net(width, height, n_res_blocks=40).to(dev)
     """持久化工人：启动后常驻显存，避免反复创建进程产生的句柄堆积"""
     # 每个进程内部初始化自己的网络副本
-    local_net = Net(width, height, n_res_blocks=40).to(device)
+    local_net = Net(width, height, n_res_blocks=40).to(dev)
     local_net.eval()
     
     while True:
@@ -39,15 +56,15 @@ def worker_loop(width, height, n_in_row, n_playout, input_queue, output_queue):
         local_net.load_state_dict(weights)
         
         # 2. 进行一局自我对弈
-        play_data = run_self_play(width, height, n_in_row, n_playout, local_net)
+        play_data = run_self_play(width, height, n_in_row, n_playout, local_net, dev)
         
         # 3. 将数据送回主进程
         output_queue.put(play_data)
 
-def run_self_play(width, height, n_in_row, n_playout, net):
+def run_self_play(width, height, n_in_row, n_playout, net, dev):
     """单局对弈逻辑，包含报错修复的归一化"""
     def policy_fn(b):
-        state = torch.FloatTensor(b.current_state()).unsqueeze(0).to(device)
+        state = torch.FloatTensor(b.current_state()).unsqueeze(0).to(dev)
         with torch.no_grad():
             log_p, v = net(state)
         probs = np.exp(log_p.cpu().numpy().flatten())
@@ -91,10 +108,11 @@ def train():
     num_workers = 8        # 5090 建议 6-8 个工人
     batch_size = 6144      # 5090 甜点位 Batch
     buffer_maxlen = 100000
-    
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     if not os.path.exists('./models'): os.makedirs('./models')
     
-    net = Net(width, height, n_res_blocks=40).to(device)
+    net = Net(width, height, n_res_blocks=40).to(dev)
     optimizer = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)
     scaler = torch.amp.GradScaler('cuda')
     buffer = deque(maxlen=buffer_maxlen)
@@ -104,7 +122,7 @@ def train():
     output_queue = mp.Queue()
     
     for j in range(num_workers):
-        p = mp.Process(target=worker_loop, args=(width, height, n_in_row, n_playout, input_queues[j], output_queue))
+        p = mp.Process(target=worker_loop, args=(width, height, n_in_row, n_playout, input_queues[j], output_queue, dev))
         p.daemon = True
         p.start()
         # 初始权重同步
@@ -127,9 +145,9 @@ def train():
             batch = random.sample(buffer, batch_size)
             s_b, p_b, z_b = zip(*batch)
             
-            s_t = torch.FloatTensor(np.array(s_b)).to(device)
-            p_t = torch.FloatTensor(np.array(p_b)).to(device)
-            z_t = torch.FloatTensor(np.array(z_b)).to(device)
+            s_t = torch.FloatTensor(np.array(s_b)).to(dev)
+            p_t = torch.FloatTensor(np.array(p_b)).to(dev)
+            z_t = torch.FloatTensor(np.array(z_b)).to(dev)
             
             optimizer.zero_grad()
             with torch.amp.autocast('cuda'):
@@ -156,9 +174,6 @@ def train():
         if (i + 1) % 100 == 0:
             torch.save(net.state_dict(), './models/gomoku_latest.pth')
             gc.collect()
-
+            
 if __name__ == '__main__':
-    # 句柄上限设为 65535
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (65535, hard))
     train()
